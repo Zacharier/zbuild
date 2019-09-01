@@ -13,14 +13,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import sys
 import re
 import commands
 import os
-
-
-WORK_PATH = os.path.join(os.getcwd(), '')
 
 
 class BuildError(IOError): pass
@@ -44,6 +40,7 @@ def say(fmt, *args, **kwargs):
 
 
 class Block:
+    
     def __init__(self, target='', deps='', command=''):
         self.target = target
         self.deps = deps
@@ -59,10 +56,10 @@ class Block:
 
 
 class OutputBlock(Block):
+
     def __init__(self, target, sources):
         self.target = target
         self.deps = ''
-
         dirs = ['bin', 'lib'] + sorted(
                 set((os.path.dirname(source) for source in sources)))
 
@@ -71,55 +68,58 @@ class OutputBlock(Block):
 
 
 class CompileBlock(Block):
+
     def __init__(self, fname, deps, args):
         name, _ = os.path.splitext(fname)
         self.target = '%s%s.o' % (args['output'], name)
         args['target'] = self.target
         args['sources'] = fname
         self.deps = deps
-        fmt = '%(compiler)s -o %(target)s -fPIC -c %(includes)s %(cxx_flags)s %(sources)s'
+        fmt = '%(compiler)s -o %(target)s -fPIC -c %(includes)s '\
+            '%(cxx_flags)s %(sources)s'
         self.command = fmt % args
 
 
 class LinkBlock(Block):
+
     def __init__(self, target, objs, visibility, args):
         self.target = '%sbin/%s' % (args['output'], target)
         args['target'] = self.target
         args['visibility'] = 'default' if visibility else 'hidden'
         self.deps = objs
         args['objs'] = objs
-        fmt = '%(compiler)s -o %(target)s -fvisibility=%(visibility)s -Wl,-E %(objs)s '\
-              '-Xlinker "-(" -Wl,--whole-archive %(ld_libs)s '\
-              '-Wl,--no-whole-archive -Xlinker "-)" %(ld_flags)s'
-
+        fmt = '%(compiler)s -o %(target)s -fvisibility=%(visibility)s '\
+            '-Wl,-E %(objs)s -Xlinker "-(" -Wl,--whole-archive %(ld_libs)s '\
+            '-Wl,--no-whole-archive -Xlinker "-)" %(ld_flags)s'
         self.command = fmt % args
 
 
 class StaticBlock(Block):
+
     def __init__(self, target, objs, visibility, args):
         self.target = '%slib/lib%s.a' % (args['output'], target)
         args['target'] = self.target
         args['visibility'] = 'default' if visibility else 'hidden'
         self.deps = objs
         args['objs'] = objs
-
         self.command = 'ar rcs %(target)s %(objs)s' % args
 
 
 class SharedBlock(Block):
+
     def __init__(self, target, objs, visibility, args):
         self.target = '%slib/lib%s.so' % (args['output'], target)
         args['target'] = self.target
         args['visibility'] = 'default' if visibility else 'hidden'
         self.deps = objs
         args['objs'] = objs
-
-        fmt = '%(compiler)s -o %(target)s -fvisibility=%(visibility)s -shared -fPIC %(objs)s '\
-              '-Xlinker "-(" %(ld_flags)s -Xlinker "-)"'
+        fmt = '%(compiler)s -o %(target)s -fvisibility=%(visibility)s '\
+            '-shared -fPIC %(objs)s -Xlinker "-(" %(ld_flags)s -Xlinker "-)"'
         self.command = fmt % args
 
 
 class CleanBlock(Block):
+
     def __init__(self, objs):
         self.target = 'clean'
         self.deps = ''
@@ -129,34 +129,33 @@ class CleanBlock(Block):
 class Makefile:
 
     def __init__(self, args, dep_table):
-        self._args = args
-        self._blocks = []
-        self._products = []
-        self._dep_table = dep_table
-        self._set = set()
+        self.args = args
+        self.blocks = []
+        self.products = []
+        self.dep_table = dep_table
+        self.set = set()
 
     def setup(self, name, source, visibility, block_type):
         blocks = []
         for item in source:
-            if item not in self._set:
-                blocks.append(CompileBlock(item, self._dep_table[item], dict(self._args)))
-                self._set.add(item)
+            if item not in self.set:
+                blocks.append(CompileBlock(item, self.dep_table[item], dict(self.args)))
+                self.set.add(item)
         objs = ' '.join((block.target for block in blocks))
-        product = block_type(name, objs, visibility, dict(self._args))
-        self._blocks.extend(blocks)
-        self._products.append(product)
+        product = block_type(name, objs, visibility, dict(self.args))
+        self.blocks.extend(blocks)
+        self.products.append(product)
 
     def write(self):
         blocks = []
         blocks.append(Block('all', 'build ' + ' '.join(
-            (product.target for product in self._products))))
+            (product.target for product in self.products))))
         blocks.append(Block())
-        blocks.append(OutputBlock('build', self._dep_table.keys()))
+        blocks.append(OutputBlock('build', self.set))
         blocks.append(Block())
-        blocks.extend(self._products)
+        blocks.extend(self.products)
         blocks.append(Block())
-        blocks.extend(self._blocks)
-
+        blocks.extend(self.blocks)
         deletes = ' '.join([block.target for block in blocks[1:]][::-1])
         blocks.append(Block())
         blocks.append(Block('.PHONY', 'clean'))
@@ -170,38 +169,38 @@ class Makefile:
 
 class ProgressBar:
     def __init__(self, capacity, width=50):
-        self._capacity = capacity
-        self._size = 0
-        self._width = width
-        self._curr = 0
-        self._print()
+        self.capacity = capacity
+        self.size = 0
+        self.width = width
+        self.curr = 0
+        self.pprint()
 
     def __enter__(self, *args):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type is None:
-            self._curr = self._width
-            self._print()
+            self.curr = self.width
+            self.pprint()
         sys.stdout.write('\n')
         sys.stdout.flush()
 
     def forward(self):
-        self._size += 1
-        percent = float(self._size) / self._capacity
-        curr = int(percent * self._width)
-        if self._curr != curr:
-            self._curr = curr
-            self._print()
+        self.size += 1
+        percent = float(self.size) / self.capacity
+        curr = int(percent * self.width)
+        if self.curr != curr:
+            self.curr = curr
+            self.pprint()
 
-    def _print(self):
-        num_total = (len(str(self._capacity)), ) * 2
+    def pprint(self):
+        num_total = (len(str(self.capacity)), ) * 2
         line = '\r%%%dd/%%%dd |' % num_total
-        line = line % (self._size, self._capacity)
-        line += '=' * self._curr
+        line = line % (self.size, self.capacity)
+        line += '=' * self.curr
         line += '>'
-        line += ' ' * (self._width - self._curr)
-        line += '| %3d%%' % int(float(self._curr) / self._width * 100)
+        line += ' ' * (self.width - self.curr)
+        line += '| %3d%%' % int(float(self.curr) / self.width * 100)
         sys.stdout.write(line)
         sys.stdout.flush()
 
@@ -216,7 +215,6 @@ class Builder:
         self.includes = []
         self.output = 'build/'
         self.sources = []
-
         self.products = []
 
     def add_app(self, name, sources, visibility):
