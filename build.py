@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import commands
+import glob
 import os
 import re
 import sys
@@ -188,7 +189,6 @@ class Makefile:
             if item not in self.set:
                 rules.append(CompileRule(item, self.dep_table[item], dict(self.args)))
                 self.set.add(item)
-        # objs = '\n\t'.join((rule.target for rule in rules))
         objs = (rule.target for rule in rules)
         product = rule_type(name, objs, visibility, dict(self.args))
         self.rules.extend(rules)
@@ -294,17 +294,12 @@ class Builder:
             with open(source) as f:
                 headers = pattern.findall(f.read())
             for header in headers:
-                # if 'client_api.h' in header:
                 subdir = os.path.dirname(header)
-                #     if subdir:
-                #         print os.path.join(parent, subdir)
-                #         includes.append(os.path.join(parent, subdir))
                 found = False
                 for include in includes:
                     path = os.path.join(include, header)
                     if path.startswith('./'): path = path[2:]
                     if path in htable:
-                        #deps.extend(htable[path])
                         found = True
                         break
                     if os.path.exists(path):
@@ -384,16 +379,7 @@ def OUTPUT(path):
 def SOURCE(*args):
     sources = []
     for path in args:
-        # parent = os.path.dirname(path)
-        if os.path.isfile(path):
-            sources.append(path)
-            continue
-        elif os.path.isdir(path):
-            os.path.join(path, '*')
-        ret, text = commands.getstatusoutput('ls ' + path)
-        if ret == 0:
-            for item in text.split('\n'):
-                sources.append(item)
+        sources += glob.glob(path)
     return sources
 
 def APPLICATION(name, source, visibility=True):
