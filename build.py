@@ -1,4 +1,5 @@
 #!/usr/bin/python2
+#
 # Copyright 2019 Zacharier
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,13 +14,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""
+https://www.gnu.org/software/make/manual/make.html
+"""
+
 import commands
 import glob
 import os
 import re
+import shelve
+import shutil
 import sys
 import time
 
+__version__ = '1.0.0'
 
 LOGO = '''\
  __________________________________________________________
@@ -34,7 +43,11 @@ LOGO = '''\
 |__________________________________________________________|
 '''
 
+
 class BuildError(IOError): pass
+
+
+class ArgError(BuildError): pass
 
 
 def say(fmt, *args, **kwargs):
@@ -55,13 +68,262 @@ def say(fmt, *args, **kwargs):
     which = kwargs.get('color')
     nl = kwargs.get('nl', '\n')
     fmt = str(fmt)
+    # sys.stdout.write(time.strftime('%Y-%m-%d %H:%M:%S ', time.localtime()))
     sys.stdout.write(colors[which] + (args and fmt % args or fmt) + '\033[0m')
     sys.stdout.write(nl)
     sys.stdout.flush()
 
 
-def break_str(deps):
-    return ' \\\n\t'.join(deps)
+def break_str(prereqs):
+    """
+    Break a string into multiline text.
+    """
+    return ' \\\n\t'.join(prereqs)
+
+
+class Options:
+    """
+    A parsed options from command line.
+    """
+
+    def __init__(self, args=None):
+        self._args = args or {}
+
+    def get(self, name):
+        return self._args.get(name)
+
+    def __getattr__(self, name):
+        try:
+            return self._args[name]
+        except KeyError:
+            return None
+
+    def __getitem__(self, name):
+        return self._args[name]
+
+    def __setitem__(self, name, val):
+        self._args[name] = val
+
+    def __contains__(self, name):
+        return name in self._args
+
+    def __str__(self):
+        return str(self._args)
+
+
+class OptionsParser:
+    """
+    Parse command line into a options object.
+    """
+
+    def __init__(self):
+        self._args = {}
+        self._actions = {}
+        self.add_option('--help', help='Show this help',
+                        typo='bool', default=False)
+
+    def add_option(self, option, help, typo='str',
+                   required=False, default=None):
+        self._actions[option] = (typo, help, required, default)
+        if not required:
+            self._args[option] = default
+
+    def parse_args(self, argv):
+        def convert(key, s):
+            types = {
+                'str': str,
+                'int': int,
+                'float': float,
+            }
+            try:
+                return types[key](s)
+            except KeyError:
+                return None
+
+        if '--help' in argv:
+            raise ArgError()
+
+        opts = Options(self._args)
+        size = len(argv)
+        i = 0
+        while i < size:
+            arg = argv[i]
+            if arg not in self._actions:
+                raise ArgError('option %s is unrecognized' % arg)
+            typo, _, __, ___ = self._actions[arg]
+            if typo == 'bool':
+                opts[arg[2:]] = True
+            else:
+                i += 1
+                if i == size:
+                    raise ArgError('option %s: too few arguments' % arg)
+                val = convert(typo, argv[i])
+                if val is None:
+                    raise ArgError(
+                        'option %s: %s is required' % (arg, typo))
+                opts[arg[2:]] = val
+            i += 1
+        for option, (_, _, required, _) in self._actions.iteritems():
+            if required and option[2:] not in opts:
+                raise ArgError('option %s is required' % option)
+        return opts
+
+    def help(self, cmd='general'):
+        s = cmd.title() + ' Options:\n'
+        for key, (_, help, __, ___) in self._actions.iteritems():
+            s += '  %-20s %s\n' % (key, help)
+        return s
+
+
+class ArgumentParser:
+    """
+    Parse command and options from command line.
+    """
+
+    def __init__(self, version=None):
+        self._commands = []
+        self._command_map = {}
+        self._version = version
+
+        self.add_command('version', 'Show version')
+        self.add_command('help', 'Show help')
+
+    def usage(self, command='<command>'):
+        return 'Usage:\n  biu %s [options]\n\n' % command
+
+    def add_command(self, command, help, option_parser=None):
+        self._commands.insert(-1, command)
+        self._command_map[command] = (help, option_parser)
+
+    def parse(self, argv):
+        if len(argv) == 0 or argv[0] == 'help':
+            self.print_help(self.help())
+        if self._version and argv[0] == 'version':
+            self.print_version(self._version)
+        if argv[0] not in self._command_map:
+            self.print_help(self.help(), 'command %s: unrecognized' % argv[0])
+        _, parser = self._command_map[argv[0]]
+        if parser is None:
+            return argv[0], None
+        try:
+            options = parser.parse_args(argv[1:])
+            return argv[0], options
+        except ArgError as e:
+            self.print_help(self.usage('build') + parser.help(argv[0]), e)
+
+    def print_help(self, help=None, error=None, stream=sys.stdout):
+        lines = [help or self.help()]
+        if isinstance(error, ArgError):
+            error = str(error)
+        if error:
+            lines.append(error)
+        stream.write('\n'.join(lines))
+        stream.write('\n')
+        sys.exit(-1 if error else 0)
+
+    def print_version(self, version):
+        sys.stdout.write(version)
+        sys.stdout.write('\n')
+        sys.exit(0)
+
+    def help(self):
+        h = self.usage()
+        h += 'Commands:\n'
+        for cmd in self._commands:
+            h += '  %-10s%s\n' % (cmd, self._command_map[cmd][0])
+        return h
+
+
+class Scope(dict):
+    """
+    A two level dict.
+    """
+
+    def __init__(self, d):
+        dict.__init__(self)
+        self._parent = d
+
+    def __getitem__(self, key):
+        try:
+            return dict.__getitem__(self, key)
+        except KeyError:
+            return self._parent[key]
+
+    def __setitem__(self, key, val):
+        return dict.__setitem__(self, key, val)
+
+
+class Flags(list):
+    def __str__(self):
+        return ' '.join(iter(self))
+
+
+class LdLibs(list):
+    def __str__(self):
+        return break_str(iter(self))
+
+
+class Includes(list):
+    def __str__(self):
+        return ' '.join(('-I %s' % arg for arg in iter(self)))
+
+
+class Storage:
+    """
+    Load a shelve db and compare with current cache.
+    """
+
+    def __init__(self, path='.biu'):
+        if not os.path.exists(path):
+            os.mkdir(path)
+
+        self._cache = {}
+        self._db = shelve.open(os.path.join(path, 'targets'))
+
+    def set(self, target, prereqs, command, is_obj):
+        self._cache[target] = (prereqs, command, is_obj)
+
+    def save(self):
+        if self._db:
+            self.compare()
+
+        self._db.clear()
+        self._db.update(self._cache)
+        self._db.close()
+
+    def compare(self):
+
+        def delete(fname):
+            if os.path.exists(fname):
+                os.remove(fname)
+
+        changed_keys = set()
+        for target, (prereqs, command, is_obj) in self._cache.iteritems():
+            pair = self._db.get(target)
+            if pair:
+                old_prereqs, old_command, _ = pair
+                if prereqs != old_prereqs or command != old_command:
+                    delete(target)
+                    changed_keys.add(target)
+            else:
+                changed_keys.add(target)
+
+        db_keys = set(self._db.keys())
+        cache_keys = set(self._cache.keys())
+        expired_keys = db_keys - cache_keys
+        for key in expired_keys:
+            delete(key)
+
+        def clean_artifact(table, invalid_keys):
+            for target, (prereqs, _, is_obj) in table.iteritems():
+                if is_obj: continue
+                for preqreq in prereqs:
+                    if preqreq in invalid_keys:
+                        delete(target)
+                        break
+
+        clean_artifact(self._db, expired_keys)
+        clean_artifact(self._cache, changed_keys)
 
 
 class MakeRule:
@@ -70,332 +332,669 @@ class MakeRule:
     TARGETS: PREREQUISITES (; COMMAND)
         COMMAND
     """
-    def __init__(self, target='', deps='', command=''):
-        self.target = target
-        self.deps = deps
-        self.command = command
+
+    def __init__(self, target, prereqs=(), command=''):
+        self._target = target
+        self._prereqs = prereqs
+        self._command = command
+
+    def target(self):
+        return self._target
+
+    def prereqs(self):
+        return self._prereqs
+
+    def command(self):
+        return self._command
 
     def __str__(self):
-        if self.target:
-            s = '%s : %s' % (self.target, self.deps)
-            if self.command:
-                s += '\n\t%s' % self.command
-            return s
-        return ''
-
-
-class OutputRule(MakeRule):
-    """
-    Generate a rule which creates output directories.
-    """
-    def __init__(self, target, sources):
-        self.target = target
-        self.deps = ''
-        dirs = ['bin', 'lib'] + sorted(
-                set((os.path.dirname(source) for source in sources)))
-
-        self.command = '\n\t'.join(
-                ('mkdir -p ' + os.path.join(target, dir) for dir in dirs))
+        prereqs = break_str(self._prereqs) if hasattr(self, '_prereqs') else ''
+        s = '%s : %s' % (self._target, prereqs)
+        if self._command:
+            s += '\n\t%s' % self._command
+        return s
 
 
 class CompileRule(MakeRule):
     """
     Generate a rule which compiles source file to object file.
     """
-    def __init__(self, fname, deps, args):
-        name, _ = os.path.splitext(fname)
-        self.target = '%s%s.o' % (args['output'], name)
-        args['target'] = self.target
+
+    def __init__(self, fname, prereqs, args, artifact):
+        target = os.path.join(args['output'], 'objs',
+                              fname + '.' + artifact + '.o')
+        args['target'] = target
         args['sources'] = fname
-        self.deps = break_str(deps)
-        fmt = '%(compiler)s -o %(target)s -fPIC -c %(includes)s '\
-            '%(cxx_flags)s %(sources)s'
-        self.command = fmt % args
+        cc_fmt = '%(cc)s -o %(target)s -c %(cflags)s %(includes)s ' \
+                 '%(sources)s'
+        cxx_fmt = '%(cxx)s -o %(target)s -c %(cxxflags)s %(includes)s ' \
+                  '%(sources)s'
+        fmt = cc_fmt if fname.endswith('.c') else cxx_fmt
+        command = fmt % args
+        MakeRule.__init__(self, target, prereqs, command)
 
 
 class LinkRule(MakeRule):
     """
     Generate a rule which links some object files.
     """
-    def __init__(self, target, objs, visibility, args):
-        self.target = '%sbin/%s' % (args['output'], target)
-        args['target'] = self.target
-        args['visibility'] = 'default' if visibility else 'hidden'
-        self.deps = args['objs'] = break_str(objs)
-        fmt = '%(compiler)s -o %(target)s -fvisibility=%(visibility)s '\
-            '-Wl,-E %(objs)s -Xlinker "-(" -Wl,--whole-archive %(ld_libs)s '\
-            '-Wl,--no-whole-archive -Xlinker "-)" %(ld_flags)s'
-        self.command = fmt % args
+
+    def __init__(self, name, prereqs, objs, args, test=False):
+        target = os.path.join(args['output'],
+                              'test' if test else 'bin', name)
+        args['target'] = target
+        args['objs'] = break_str(objs)
+        fmt = '%(cxx)s -o %(target)s ' \
+              '-Wl,-E %(objs)s %(ldflags)s -Xlinker "-(" %(ldlibs)s ' \
+              '-Xlinker "-)"'
+        command = fmt % args
+        MakeRule.__init__(self, target, prereqs, command)
+
+
+class SharedRule(MakeRule):
+    """
+    Generate a rule which links some object files to a Shared Object file.
+    """
+
+    def __init__(self, name, prereqs, objs, args):
+        target = os.path.join(args['output'], 'lib', name)
+        args['target'] = self._target
+        args['objs'] = break_str(objs)
+        fmt = '%(cxx)s -o %(target)s shared -fPIC' \
+              '%(objs)s %(ldflags)s -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
+        command = fmt % args
+        MakeRule.__init__(self, target, prereqs, command)
 
 
 class StaticRule(MakeRule):
     """
     Generate a rule which archive some object files to an archived file.
     """
-    def __init__(self, target, objs, visibility, args):
-        self.target = '%slib/lib%s.a' % (args['output'], target)
-        args['target'] = self.target
-        args['visibility'] = 'default' if visibility else 'hidden'
-        self.deps = args['objs'] = break_str(objs)
-        self.command = 'ar rcs %(target)s %(objs)s' % args
 
-
-class SharedRule(MakeRule):
-    """
-    Generate a rule which links some object files to a so(shared object) file.
-    """
-    def __init__(self, target, objs, visibility, args):
-        self.target = '%slib/lib%s.so' % (args['output'], target)
-        args['target'] = self.target
-        args['visibility'] = 'default' if visibility else 'hidden'
-        self.deps = args['objs'] = break_str(objs)
-        fmt = '%(compiler)s -o %(target)s -fvisibility=%(visibility)s '\
-            '-shared -fPIC %(objs)s -Xlinker "-(" %(ld_flags)s -Xlinker "-)"'
-        self.command = fmt % args
+    def __init__(self, name, prereqs, objs, args):
+        target = os.path.join(args['output'], 'lib', name)
+        args['target'] = target
+        args['objs'] = break_str(objs)
+        command = 'ar rcs %(target)s %(objs)s' % args
+        MakeRule.__init__(self, target, prereqs, command)
 
 
 class CleanRule(MakeRule):
     """
     Generate a rule which cleans all of files generated by makefile.
     """
+
     def __init__(self, objs):
-        self.target = 'clean'
-        self.deps = ''
-        self.command = '-rm -fr %s' % break_str(filter(lambda x:x.strip(),
-            objs))
+        target = 'clean'
+        command = '-rm -fr ' + break_str(sorted(set(objs)))
+        MakeRule.__init__(self, target, (), command)
 
 
-class Makefile:
+class Artifact:
     """
-    Collect all of rules and generate a makefile file.
+    An abstract class which produces a snippet of makefile. In which
+    a snippet can makes a executable file(.out) ora shared object(.so)
+    or a archived file(.a).
     """
 
-    __notice__ = '\n'.join((
-        '# file : Makefile',
-        '# brief: this file was generated by `biu`',
-        '# date : %s' % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    ))
+    def __init__(self, name, args, sources):
+        self._name = name
+        self._args = args
+        self._sources = sources
+        self._objs = []
+        self._rule = None
+        self._sub_rules = []
 
-    def __init__(self, args, dep_table):
-        self.args = args
-        self.rules = []
-        self.products = []
-        self.dep_table = dep_table
-        self.set = set()
+    def name(self):
+        return self._name
 
-    def setup(self, name, source, visibility, rule_type):
-        rules = []
-        for item in source:
-            if item not in self.set:
-                rules.append(CompileRule(item, self.dep_table[item], dict(self.args)))
-                self.set.add(item)
-        objs = (rule.target for rule in rules)
-        product = rule_type(name, objs, visibility, dict(self.args))
-        self.rules.extend(rules)
-        self.products.append(product)
+    def sources(self):
+        return self._sources
 
-    def write(self):
-        rules = []
-        rules.append(MakeRule('all', 'build ' + ' '.join(
-            (product.target for product in self.products))))
-        rules.append(MakeRule())
-        rules.append(OutputRule('build', self.set))
-        rules.append(MakeRule())
-        rules.extend(self.products)
-        rules.append(MakeRule())
-        rules.extend(self.rules)
-        deletes = [rule.target for rule in rules[1:]][::-1]
-        rules.append(MakeRule())
-        rules.append(MakeRule('.PHONY', 'clean'))
-        rules.append(CleanRule(deletes))
+    def build(self, prereqs_table, modules):
+        for source in self._sources:
+            prereqs = prereqs_table[source]
+            rule = CompileRule(source, prereqs, self._args, self._name)
+            self._objs.append(rule.target())
+            self._sub_rules.append(rule)
 
-        with open('Makefile', 'w') as f:
-            f.write(self.__notice__)
-            f.write('\n')
-            f.write('\n')
-            for rule in rules:
-                f.write(str(rule))
-                f.write('\n')
+    def obj_rules(self):
+        return self._sub_rules
+
+    def rule(self):
+        return self._rule
 
 
-class ProgressBar:
+class Binary(Artifact):
     """
-    Print a progress bar in terminal.
+    Binary file.
     """
-    def __init__(self, capacity, width=50):
-        self.capacity = capacity
-        self.size = 0
-        self.width = width
-        self.curr = 0
-        self.pprint()
 
-    def __enter__(self, *args):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is None:
-            self.curr = self.width
-            self.pprint()
-        sys.stdout.write('\n')
-        sys.stdout.flush()
-
-    def forward(self):
-        self.size += 1
-        percent = float(self.size) / self.capacity
-        curr = int(percent * self.width)
-        if self.curr != curr:
-            self.curr = curr
-            self.pprint()
-
-    def pprint(self):
-        num_total = (len(str(self.capacity)), ) * 2
-        line = '\r%%%dd/%%%dd |' % num_total
-        line = line % (self.size, self.capacity)
-        line += '=' * self.curr
-        line += '>'
-        line += ' ' * (self.width - self.curr)
-        line += '| %3d%%' % int(float(self.curr) / self.width * 100)
-        sys.stdout.write(line)
-        sys.stdout.flush()
+    def build(self, prereqs_table, modules):
+        Artifact.build(self, prereqs_table, modules)
+        self._rule = LinkRule(self._name, self._objs + modules,
+                              self._objs, self._args)
 
 
-class Builder:
+class Test(Artifact):
     """
-    A core which controls how to genertate a makefile.
-    additionally, in order to generate valid commands,
-    it always verifies dependent files before making a makefile.
+    Unit Test.
     """
-    def __init__(self):
-        self.compiler = 'g++'
-        self.c_flags = []
-        self.cxx_flags = []
-        self.ld_flags = []
-        self.ld_libs = []
-        self.includes = []
-        self.output = 'build/'
-        self.sources = []
-        self.products = []
 
-    def add_app(self, name, sources, visibility):
-        self.products.append((name, sources, visibility, LinkRule))
-
-    def add_static(self, name, sources, visibility):
-        self.products.append((name, sources, visibility, StaticRule))
-
-    def add_shared(self, name, sources, visibility):
-        self.products.append((name, sources, visibility, SharedRule))
-
-    def analyze(self):
-        pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
-        where = None
-        includes = []
-        htable = {}
-        def find(source, deps):
-            with open(source) as f:
-                headers = pattern.findall(f.read())
-            for header in headers:
-                subdir = os.path.dirname(header)
-                found = False
-                for include in includes:
-                    path = os.path.join(include, header)
-                    if path.startswith('./'): path = path[2:]
-                    if path in htable:
-                        found = True
-                        break
-                    if os.path.exists(path):
-                        if subdir:
-                            includes.append(os.path.dirname(path))
-                        deps.append(path)
-                        local_deps = []
-                        htable[path] = local_deps
-                        find(path, local_deps)
-                        deps.extend(local_deps)
-                        found = True
-                        break
-                if not found:
-                    raise BuildError('Not Found: %s in %s' % (header, where))
-
-        source_set = set()
-        for _, sources, __, ____ in self.products:
-            source_set.update(sources)
-        source_size = len(source_set)
-        say('Collected %d sources', source_size)
-        say('Analyzing dependences...')
-        table = {}
-        with ProgressBar(source_size) as bar:
-            for source in sorted(source_set):
-                where = source
-                includes = list(self.includes)
-                deps = [source]
-                find(source, deps)
-                table[source] = deps
-                bar.forward()
-        return table
+    def build(self, prereqs_table, modules):
+        Artifact.build(self, prereqs_table, modules)
+        self._rule = LinkRule(self._name, self._objs + modules,
+                              self._objs, self._args, True)
 
 
-    def args(self):
-        return {
-            'c_flags': ' '.join(self.c_flags),
-            'cxx_flags': ' '.join(self.cxx_flags),
-            'ld_flags': ' '.join(self.ld_flags),
-            'ld_libs': break_str(self.ld_libs),
-            'includes': ' '.join(('-I %s' % arg for arg in self.includes)),
-            'output': self.output,
-            'compiler': self.compiler
-        }
+class SharedLibrary(Artifact):
+    """
+    Shared Object.
+    """
 
-    def build(self):
-        dep_table = self.analyze()
-        makefile = Makefile(self.args(), dep_table)
-        for product in self.products:
-            makefile.setup(*product)
-        makefile.write()
+    def build(self, prereqs_table, modules):
+        Artifact.build(self, prereqs_table, modules)
+        self._rule = SharedRule(self._name, self._objs + modules,
+                                self._objs, self._args)
 
 
-builder = Builder()
+class StaticLibrary(Artifact):
+    """
+    Static Libary
+    """
+
+    def build(self, prereqs_table, modules):
+        Artifact.build(self, prereqs_table, modules)
+        self._rule = StaticRule(self._name, self._objs + modules, self._objs, self._args)
 
 
-def COMPILER(path):
-    builder.compiler = path
-
-def C_FLAGS(*args):
-    builder.c_flags.extend(args)
-
-def CXX_FLAGS(*args):
-    builder.cxx_flags.extend(args)
-
-def LD_FLAGS(*args):
-    builder.ld_flags.extend(args)
-
-def LD_LIBS(*args):
-    builder.ld_libs.extend(args)
-
-def INCLUDE(*args):
-    builder.includes.extend(args)
-
-def OUTPUT(path):
-    builder.output = path
-
-def SOURCE(*args):
+def globs(args):
     sources = []
     for path in args:
         sources += glob.glob(path)
     return sources
 
-def APPLICATION(name, source, visibility=True):
-    builder.add_app(name, source, visibility)
 
-def STATIC_LIBRARY(name, source, visibility=True):
-    builder.add_static(name, source, visibility)
+class DepsAnalyzer:
+    def __init__(self):
+        self._pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
+        self._prereqs_table = {}
 
-def SHARED_LIBRARY(name, source, visibility=True):
-    builder.add_shared(name, source, visibility)
+    def _scan(self, src, includes):
+        where = src
+        seen = set()
+
+        def find(source):
+            if source in seen:
+                return
+            seen.add(source)
+            curdir = os.path.dirname(source)
+            if curdir.strip('./') and curdir not in includes:
+                includes.append(curdir)
+            with open(source) as f:
+                headers = self._pattern.findall(f.read())
+            for header in headers:
+                found = False
+                for include in list(includes):
+                    path = os.path.join(include, header)
+                    if path.startswith('./'):
+                        path = path[2:]
+                    if os.path.exists(path):
+                        find(path)
+                        found = True
+                        break
+                if False and not found and (source.endswith('.c')
+                                            or source.endswith('.cc')
+                                            or source.endswith('.cpp')):
+                    raise BuildError('Not Found: %s from %s' %
+                                     (header, where))
+
+        find(src)
+        seen.discard(src)
+        prereqs = [src]
+        prereqs.extend(seen)
+        return prereqs
+
+    def analyze(self, sources, includes):
+        fmt = '[%%%dd/%%d] analyze %%s' % len(str(len(sources)))
+        for i, source in enumerate(sources):
+            say(fmt, i + 1, len(sources), source)
+            if source not in self._prereqs_table:
+                prereqs = self._scan(source, includes)
+                self._prereqs_table[source] = prereqs
+        return self._prereqs_table
+
+
+class Module:
+    """
+    Module represents a builder which builds a Makefile file.
+    """
+
+    def __init__(self, workspace, build_path='.biu', output_path='output'):
+        self._name = os.path.basename(workspace)
+        self._vars = self._adjust({
+            'cflags': [],
+            'cxxflags': [],
+            'ldflags': [],
+            'ldlibs': [],
+            'includes': [],
+            'output': os.path.join(output_path, self._name, ''),
+            'cc': 'gcc',
+            'cxx': 'g++',
+        })
+        self._protoc = 'protoc'
+        self._storage = Storage(build_path)
+        self._protos = set()
+        self._artifacts = []
+        self._sub_modules = []
+        self._phonies = ['all', 'clean']
+        self._analyzer = DepsAnalyzer()
+        self._output_path = output_path
+
+    def set_cc(self, name_or_path):
+        self._vars['cc'] = name_or_path
+
+    def set_cxx(self, name_or_path):
+        self._vars['cxx'] = name_or_path
+
+    def add_cflags(self, flags):
+        self._vars['cflags'].append(flags)
+
+    def add_cxxflags(self, flags):
+        self._vars['cxxflags'].append(flags)
+
+    def add_ldflags(self, flags):
+        self._vars['ldflags'].append(flags)
+
+    def add_ldlibs(self, libs):
+        self._vars['ldlibs'].append(libs)
+
+    def add_includes(self, incs):
+        self._vars['includes'].append(incs)
+
+    def add_sub_module(self, workspace, libs):
+        workspace = os.path.abspath(workspace)
+        name = os.path.basename(workspace.rstrip('/'))
+        output = os.path.join(workspace, self._output_path, name, '')
+        libs = [os.path.join(output, lib) for lib in libs]
+        for lib in libs:
+            self.add_ldlibs(lib)
+        self._sub_modules.append((name, workspace, libs))
+        self._phonies.append(name)
+
+    def sub_modules(self):
+        return self._sub_modules
+
+    def output(self):
+        return self._vars['output']
+
+    def set_protoc(self, name_or_path):
+        self._protoc = name_or_path
+
+    def add_protos(self, protos):
+        self._protos.update(protos)
+
+    def protoc(self):
+        return self._protoc
+
+    def _adjust(self, kwargs):
+        if 'includes' in kwargs:
+            kwargs['includes'] = Includes(globs(kwargs['includes']))
+        if 'ldlibs' in kwargs:
+            kwargs['ldlibs'] = LdLibs(globs(kwargs['ldlibs']))
+        for flags in ('cflags', 'cxxflags', 'ldflags'):
+            if flags in kwargs:
+                kwargs[flags] = Flags(kwargs[flags])
+        return kwargs
+
+    def _sanitize(self, sources, protos, kwargs):
+        pbs = [proto.replace('.proto', '.pb.cc') for proto in protos]
+        self._protos.update(protos)
+        scope = Scope(self._vars)
+        scope.update(self._adjust(kwargs))
+        return scope, sources + pbs
+
+    def add_binary(self, name, sources, protos, kwargs):
+        scope, srcs = self._sanitize(sources, protos, kwargs)
+        app = Binary(name, scope, srcs)
+        self._artifacts.append(app)
+
+    def add_test(self, name, sources, protos, kwargs):
+        scope, srcs = self._sanitize(sources, protos, kwargs)
+        app = Test(name, scope, srcs)
+        self._artifacts.append(app)
+
+    def add_shared(self, name, sources, protos, kwargs):
+        scope, srcs = self._sanitize(sources, protos, kwargs)
+        shared = SharedLibrary(name, scope, srcs)
+        self._artifacts.append(shared)
+
+    def add_static(self, name, sources, protos, kwargs):
+        scope, srcs = self._sanitize(sources, protos, kwargs)
+        static = StaticLibrary(name, scope, srcs)
+        self._artifacts.append(static)
+
+    def _save(self):
+        storage = self._storage
+        for artifact in self._artifacts:
+            for obj_rule in artifact.obj_rules():
+                storage.set(obj_rule.target(), obj_rule.prereqs(),
+                            obj_rule.command(), True)
+            rule = artifact.rule()
+            storage.set(rule.target(), rule.prereqs(), rule.command(), False)
+        storage.save()
+
+    def _build(self, protos):
+        proto_dirs = set([os.path.dirname(path) for path in protos])
+        proto_paths = ' '.join(
+            ['--proto_path ' + proto_dir for proto_dir in proto_dirs])
+        for proto in protos:
+            command = '%s %s --cpp_out=%s %s' % (self.protoc(), proto_paths,
+                                                 os.path.dirname(proto), proto)
+            say(command, color='green')
+            status, text = commands.getstatusoutput(command)
+            if status:
+                raise BuildError(text)
+
+    def build(self, makefile):
+        if self._protos:
+            self._build(self._protos)
+        say('artifacts: [%s]',
+            ', '.join([artifact.name() for artifact in self._artifacts]))
+        sources = set()
+        for artifact in self._artifacts:
+            sources.update(artifact.sources())
+        prereqs_table = self._analyzer.analyze(sorted(sources), self._vars['includes'])
+        modules = [module for module, _, _ in self._sub_modules]
+        for artifact in self._artifacts:
+            artifact.build(prereqs_table, modules)
+
+        self._write(makefile)
+        self._save()
+
+    def _write(self, makefile):
+        dircs = set()
+        art_rules = []
+        obj_rules = []
+
+        for artifact in self._artifacts:
+            for obj_rule in artifact.obj_rules():
+                obj_rules.append(obj_rule)
+                dircs.add(os.path.dirname(obj_rule.target()))
+            rule = artifact.rule()
+            art_rules.append(rule)
+            dircs.add(os.path.dirname(rule.target()))
+
+        rules = []
+        rules.append(MakeRule('.PHONY', self._phonies))
+        rules.append('')
+        rules.append(MakeRule('all',
+                              [product.target() for product in art_rules]))
+        rules.append('')
+        rules.append('')
+        rules.extend(art_rules)
+        rules.append('')
+        rules.extend(obj_rules)
+        rules.append('')
+
+        for name, workspace, _ in self._sub_modules:
+            rules.append(MakeRule(name, (), 'make -C ' + workspace))
+        rules.append(CleanRule([rule.target() for rule in obj_rules]))
+
+        notice = '\n'.join((
+            '# file : Makefile',
+            '# brief: this file was generated by `biu`',
+            '# date : %s' % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        ))
+
+        with open(makefile, 'w') as out:
+            out.write(notice)
+            out.write('\n')
+            out.write('\n')
+            for rule in rules:
+                out.write(str(rule))
+                out.write('\n')
+
+        for dirc in sorted(dircs):
+            if not os.path.exists(dirc):
+                os.makedirs(dirc)
+        for name, workspace, _ in self._sub_modules:
+            output = os.path.join(self._output_path, name)
+            output = os.path.join(workspace, output)
+            linked_output = os.path.join(self._output_path, name)
+            if os.path.islink(linked_output):
+                os.unlink(linked_output)
+            os.symlink(output, os.path.join(self._output_path, name))
+
+    def artifacts(self):
+        return self._artifacts
+
+    def phonies(self):
+        return self._phonies
+
+
+def api(module):
+    """
+    Api offers some functions which can be invoked by BUILD.
+    """
+
+    def CC(arg):
+        module.set_cc(arg)
+
+    def CXX(arg):
+        module.set_cxx(arg)
+
+    def CFLAGS(arg):
+        module.add_cflags(arg)
+
+    def CXXFLAGS(arg):
+        module.add_cxxflags(arg)
+
+    def LDFLAGS(arg):
+        module.add_ldflags(arg)
+
+    def LDLIBS(arg):
+        module.add_ldlibs(arg)
+
+    def INCLUDES(arg):
+        module.add_includes(arg)
+
+    def PROTOC(arg):
+        module.set_protoc(arg)
+
+    def PROTOS(arg):
+        module.add_protos(arg)
+
+    def BINARY(name, sources, protos=(), **kwargs):
+        module.add_binary(name, globs(sources), globs(protos), kwargs)
+
+    def TEST(name, sources, protos=(), **kwargs):
+        module.add_test(name, globs(sources), globs(protos), kwargs)
+
+    def LIBRARY(name, sources, protos=(), **kwargs):
+        if name.endswith('.a'):
+            module.add_static(name, globs(sources), globs(protos), kwargs)
+        elif name.endswith('.so'):
+            module.add_shared(name, globs(sources), globs(protos), kwargs)
+        else:
+            raise BuildError('Unrecognized: ' + name)
+
+    def SUBMODULE(workspace, libs):
+        module.add_sub_module(workspace, libs)
+
+    return locals()
+
+
+class Template:
+    """
+    Build Template which generates a BUILD file.
+    """
+
+    def __init__(self):
+        self._cc = 'gcc'
+        self._cxx = 'g++'
+        self._protoc = 'protoc'
+        self._cflags = ['-g -pipe -Wall -std=c99']
+        self._cxxflags = ['-g -pipe -Wall -std=c++11']
+        self._ldflags = ['-L.']
+        self._ldlibs = ['-lpthread']
+        self._protos = ['proto/*.proto']
+        self._sources = ['src/*.cc', 'src/*.cpp']
+        self._includes = ['src/']
+        self._app = 'app'
+
+    def cc(self, cc):
+        return "CC('%s')" % (cc or self._cc)
+
+    def cxx(self, cxx):
+        return "CXX('%s')" % (cxx or self._cxx)
+
+    def protoc(self, protoc):
+        return "# PROTOC('%s')" % (protoc or self._protoc)
+
+    def cflags(self, cflags):
+        flags = cflags.split(',') if cflags else self._cflags
+        return "CFLAGS(%s)" % ', '.join([repr(flag) for flag in flags])
+
+    def cxxflags(self, cxxflags):
+        flags = cxxflags.split(',') if cxxflags else self._cxxflags
+        return "CXXFLAGS(%s)" % ', '.join([repr(flag) for flag in flags])
+
+    def ldflags(self, ldflags):
+        flags = ldflags.split(',') if ldflags else self._ldflags
+        return "LDFLAGS(%s)" % ', '.join([repr(flag) for flag in flags])
+
+    def ldlibs(self, ldlibs):
+        libs = ldlibs.split(',') if ldlibs else self._ldlibs
+        return "LDLIBS(%s)" % ', '.join([repr(lib) for lib in libs])
+
+    def includes(self, includes):
+        incs = includes.split(',') if includes else self._includes
+        return "INCLUDES(%s)" % ', '.join([repr(inc) for inc in incs])
+
+    def protos(self, protos):
+        ptos = protos.split(',') if protos else self._protos
+        return "# PROTOS(%s)" % ', '.join([repr(proto) for proto in ptos])
+
+    def binary(self, app, includes, sources):
+        incs = includes.split(',') if includes else self._includes
+        include = ', '.join([repr(inc) for inc in incs])
+        srcs = sources.split(',') if sources else self._sources
+        source = ', '.join([repr(src) for src in srcs])
+        args = (app or self._app, include, source)
+        return "BINARY('%s', includes=[%s], sources=[%s])" % args
+
+    def format(self, kwargs):
+        lines = []
+        lines.append(self.cc(kwargs.get('cc')))
+        lines.append(self.cxx(kwargs.get('cxx')))
+        lines.append(self.protoc(kwargs.get('protoc')))
+        lines.append(self.cflags(kwargs.get('cflags')))
+        lines.append(self.cxxflags(kwargs.get('cxxflags')))
+        lines.append(self.ldflags(kwargs.get('ldflags')))
+        lines.append(self.ldlibs(kwargs.get('ldlibs')))
+        # lines.append(self.includes(kwargs.get('includes')))
+        lines.append(self.protos(kwargs.get('protos')))
+        lines.append(self.binary(kwargs.get('binary'),
+                                 kwargs.get('includes'),
+                                 kwargs.get('sources')))
+        return '\n\n'.join(lines)
+
+
+class BiuBiu:
+    """
+    Collect all of rules and generate a makefile file.
+    """
+
+    def __init__(self):
+        self._build_path = '.biu'
+        self._output_path = 'output'
+        self._modules_path = os.path.join(self._build_path, 'modules')
+
+    def _write_modules(self, workspaces):
+        with open(self._modules_path, 'w') as f:
+            for workspace in workspaces:
+                f.write(workspace)
+                f.write('\n')
+
+    def build(self):
+        pwd = os.getcwd()
+        workspace = pwd
+        name = os.path.basename(workspace)
+        say('=' * 40 + ' build ' + name + ' ' + '=' * 40)
+
+        major = Module(workspace, self._build_path, self._output_path)
+        execfile(os.path.join(workspace, 'BUILD'), api(major))
+        major.build('Makefile')
+
+        module_paths = [pwd]
+        for name, workspace, _ in major.sub_modules():
+            say('=' * 40 + ' build ' + name + ' ' + '=' * 40)
+            os.chdir(workspace)
+            module = Module(workspace, self._build_path, self._output_path)
+            execfile(os.path.join(workspace, 'BUILD'), api(module))
+            module.build('Makefile')
+            os.chdir(pwd)
+            module_paths.append(workspace)
+
+        self._write_modules(module_paths)
+
+        say('-' * 50)
+        say('build makefile : Makefile')
+        say('build output   : %s', os.path.join(major.output(), ''))
+        say('build date     : %s', time.strftime('%Y-%m-%d %H:%M:%S ',
+                                                 time.localtime()))
+
+        say('\nplease execute `make` command to make this project.',
+            color='yellow')
+
+    def clean(self):
+        modules = [os.getcwd()]
+        if os.path.exists(self._modules_path):
+            with open(self._modules_path) as f:
+                modules = [line.strip() for line in f.readlines()]
+        for workspace in modules:
+            makefile_path = os.path.join(workspace, 'Makefile')
+            build_path = os.path.join(workspace, self._build_path)
+            output_path = os.path.join(workspace, self._output_path)
+            if os.path.exists(makefile_path):
+                os.remove(makefile_path)
+            shutil.rmtree(build_path, True)
+            shutil.rmtree(output_path, True)
+
+    def create(self, kwargs):
+        tpl = Template()
+        content = tpl.format(kwargs)
+        with open('BUILD', 'w') as f:
+            f.write(content)
+
+
+def do_args(args):
+    build_parser = OptionsParser()
+    # create_parser = OptionsParser()
+    parser = ArgumentParser(version=__version__)
+    parser.add_command('create', 'Create a BUILD file', build_parser)
+    parser.add_command('build', 'Build project and create a makefile', None)
+    parser.add_command('clean', 'Clean this project', None)
+    command, options = parser.parse(args)
+    return command, options
+
+
+def main(args):
+    command, options = do_args(args)
+    biu = BiuBiu()
+    try:
+        if command == 'create':
+            biu.create(options)
+        elif command == 'build':
+            say(LOGO)
+            biu.build()
+        elif command == 'clean':
+            biu.clean()
+    except Exception as e:
+        say(e, color="red")
+        raise
 
 
 if __name__ == '__main__':
-    say(LOGO)
-    try:
-        exec(open('BUILD').read(), globals())
-        builder.build()
-    except Exception as e:
-        say(e, color="red")
+    main(sys.argv[1:])
