@@ -301,33 +301,30 @@ class Storage:
             if os.path.exists(fname):
                 os.remove(fname)
 
-        changed_keys = set()
+        updated_keys = set()
         for target, (prereqs, command, is_obj) in self._cache.iteritems():
             pair = self._db.get(target)
             if pair:
                 old_prereqs, old_command, _ = pair
                 if prereqs != old_prereqs or command != old_command:
                     delete(target)
-                    changed_keys.add(target)
+                    updated_keys.add(target)
             else:
-                changed_keys.add(target)
+                updated_keys.add(target)
 
-        db_keys = set(self._db.keys())
-        cache_keys = set(self._cache.keys())
-        expired_keys = db_keys - cache_keys
+        expired_keys = set(self._db.keys()) - set(self._cache.keys())
         for key in expired_keys:
             delete(key)
 
         def clean_artifact(table, invalid_keys):
             for target, (prereqs, _, is_obj) in table.iteritems():
                 if is_obj: continue
-                for preqreq in prereqs:
-                    if preqreq in invalid_keys:
-                        delete(target)
-                        break
+                if set(prereqs) & invalid_keys:
+                    delete(target)
+                    break
 
         clean_artifact(self._db, expired_keys)
-        clean_artifact(self._cache, changed_keys)
+        clean_artifact(self._cache, updated_keys)
 
 
 class MakeRule:
@@ -509,7 +506,8 @@ class StaticLibrary(Artifact):
 
     def build(self, prereqs_table, modules):
         Artifact.build(self, prereqs_table, modules)
-        self._rule = StaticRule(self._name, self._objs + modules, self._objs, self._args)
+        self._rule = StaticRule(self._name, self._objs + modules,
+                                self._objs, self._args)
 
 
 def globs(args):
@@ -543,6 +541,7 @@ class DepsAnalyzer:
                     self._find(path, includes, seen)
                     found = True
                     break
+            # Temporarily skip following check.
             if False and not found and (source.endswith('.c')
                                         or source.endswith('.cc')
                                         or source.endswith('.cpp')):
