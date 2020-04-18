@@ -637,7 +637,7 @@ class Module:
         if 'includes' in kwargs:
             kwargs['includes'] = Includes(globs(kwargs['includes']))
         if 'ldlibs' in kwargs:
-            kwargs['ldlibs'] = LdLibs(globs(kwargs['ldlibs']))
+            kwargs['ldlibs'] = LdLibs(kwargs['ldlibs'])
         for flags in ('cflags', 'cxxflags', 'ldflags'):
             if flags in kwargs:
                 kwargs[flags] = Flags(kwargs[flags])
