@@ -170,9 +170,13 @@ class OptionsParser:
 
     def help(self, cmd='general'):
         s = cmd.title() + ' Options:\n'
+        last = ''
         for key, (_, help, __, ___) in self._actions.iteritems():
-            s += '  %-20s %s\n' % (key, help)
-        return s
+            if '--help' == key:
+                last = '  %-20s %s\n' % (key, help)
+            else:
+                s += '  %-20s %s\n' % (key, help)
+        return s + last
 
 
 class ArgumentParser:
@@ -520,36 +524,35 @@ class DepsAnalyzer:
         self._pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
         self._prereqs_table = {}
 
+    def _find(self, source, includes, seen):
+        if source in seen:
+            return
+        seen.add(source)
+        curdir = os.path.dirname(source)
+        if curdir.strip('./') and curdir not in includes:
+            includes.append(curdir)
+        with open(source) as f:
+            headers = self._pattern.findall(f.read())
+        for header in headers:
+            found = False
+            for include in list(includes):
+                path = os.path.join(include, header)
+                if path.startswith('./'):
+                    path = path[2:]
+                if os.path.exists(path):
+                    self._find(path, includes, seen)
+                    found = True
+                    break
+            if False and not found and (source.endswith('.c')
+                                        or source.endswith('.cc')
+                                        or source.endswith('.cpp')):
+                raise BuildError('Not Found: %s from %s' %
+                                 (header, where))
+
     def _scan(self, src, includes):
         where = src
         seen = set()
-
-        def find(source):
-            if source in seen:
-                return
-            seen.add(source)
-            curdir = os.path.dirname(source)
-            if curdir.strip('./') and curdir not in includes:
-                includes.append(curdir)
-            with open(source) as f:
-                headers = self._pattern.findall(f.read())
-            for header in headers:
-                found = False
-                for include in list(includes):
-                    path = os.path.join(include, header)
-                    if path.startswith('./'):
-                        path = path[2:]
-                    if os.path.exists(path):
-                        find(path)
-                        found = True
-                        break
-                if False and not found and (source.endswith('.c')
-                                            or source.endswith('.cc')
-                                            or source.endswith('.cpp')):
-                    raise BuildError('Not Found: %s from %s' %
-                                     (header, where))
-
-        find(src)
+        self._find(src, includes, seen)
         seen.discard(src)
         prereqs = [src]
         prereqs.extend(seen)
@@ -609,9 +612,6 @@ class Module:
     def add_ldlibs(self, libs):
         self._vars['ldlibs'].append(libs)
 
-    def add_includes(self, incs):
-        self._vars['includes'].append(incs)
-
     def add_sub_module(self, workspace, libs):
         workspace = os.path.abspath(workspace)
         name = os.path.basename(workspace.rstrip('/'))
@@ -630,9 +630,6 @@ class Module:
 
     def set_protoc(self, name_or_path):
         self._protoc = name_or_path
-
-    def add_protos(self, protos):
-        self._protos.update(protos)
 
     def protoc(self):
         return self._protoc
@@ -796,14 +793,8 @@ def api(module):
     def LDLIBS(arg):
         module.add_ldlibs(arg)
 
-    def INCLUDES(arg):
-        module.add_includes(arg)
-
     def PROTOC(arg):
         module.set_protoc(arg)
-
-    def PROTOS(arg):
-        module.add_protos(arg)
 
     def BINARY(name, sources, protos=(), **kwargs):
         module.add_binary(name, globs(sources), globs(protos), kwargs)
@@ -872,10 +863,6 @@ class Template:
         incs = includes.split(',') if includes else self._includes
         return "INCLUDES(%s)" % ', '.join([repr(inc) for inc in incs])
 
-    def protos(self, protos):
-        ptos = protos.split(',') if protos else self._protos
-        return "# PROTOS(%s)" % ', '.join([repr(proto) for proto in ptos])
-
     def binary(self, app, includes, sources):
         incs = includes.split(',') if includes else self._includes
         include = ', '.join([repr(inc) for inc in incs])
@@ -893,8 +880,6 @@ class Template:
         lines.append(self.cxxflags(kwargs.get('cxxflags')))
         lines.append(self.ldflags(kwargs.get('ldflags')))
         lines.append(self.ldlibs(kwargs.get('ldlibs')))
-        # lines.append(self.includes(kwargs.get('includes')))
-        lines.append(self.protos(kwargs.get('protos')))
         lines.append(self.binary(kwargs.get('binary'),
                                  kwargs.get('includes'),
                                  kwargs.get('sources')))
@@ -970,10 +955,12 @@ class BiuBiu:
 
 
 def do_args(args):
-    build_parser = OptionsParser()
-    # create_parser = OptionsParser()
+    create_parser = OptionsParser()
+    create_parser.add_option('--name', help='Binary name')
+    create_parser.add_option('--sources', help='Directory of source codes')
+
     parser = ArgumentParser(version=__version__)
-    parser.add_command('create', 'Create a BUILD file', build_parser)
+    parser.add_command('create', 'Create BUILD file', create_parser)
     parser.add_command('build', 'Build project and create a makefile', None)
     parser.add_command('clean', 'Clean this project', None)
     command, options = parser.parse(args)
