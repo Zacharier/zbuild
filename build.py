@@ -452,9 +452,39 @@ class Artifact:
     def sources(self):
         return self._sources
 
-    def build(self, prereqs_table, modules):
-        for source in self._sources:
-            prereqs = prereqs_table[source]
+    def build(self, modules):
+        includes = self._args.get('includes', ())
+        pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
+
+        def expand(headers):
+            prereq_paths = []
+            for header in headers:
+                for include in includes:
+                    path = os.path.join(include, header)
+                    if os.path.exists(path):
+                        prereq_paths.append(path)
+                        break
+            return prereq_paths
+
+        def search(source):
+            prereq_paths = []
+            seen = set()
+            queue = [source]
+            while queue:
+                first = queue.pop(0)
+                prereq_paths.append(first)
+                with open(first) as f:
+                    headers = pattern.findall(f.read())
+                    hs = filter(lambda x: x not in seen, headers)
+                    seen.update(headers)
+                    queue += expand(hs)
+            return prereq_paths
+
+        prereq_table = {}
+        fmt = '[%%%dd/%%d] analyzing %%s' % len(str(len(self._sources)))
+        for i, source in enumerate(self._sources):
+            say(fmt, i + 1, len(self._sources), source)
+            prereqs = search(source)
             rule = CompileRule(source, prereqs, self._args, self._name)
             self._objs.append(rule.target())
             self._sub_rules.append(rule)
@@ -471,8 +501,8 @@ class Binary(Artifact):
     Binary file.
     """
 
-    def build(self, prereqs_table, modules):
-        Artifact.build(self, prereqs_table, modules)
+    def build(self, modules):
+        Artifact.build(self, modules)
         self._rule = LinkRule(self._name, self._objs + modules,
                               self._objs, self._args)
 
@@ -482,8 +512,8 @@ class Test(Artifact):
     Unit Test.
     """
 
-    def build(self, prereqs_table, modules):
-        Artifact.build(self, prereqs_table, modules)
+    def build(self, modules):
+        Artifact.build(self, modules)
         self._rule = LinkRule(self._name, self._objs + modules,
                               self._objs, self._args, True)
 
@@ -493,8 +523,8 @@ class SharedLibrary(Artifact):
     Shared Object.
     """
 
-    def build(self, prereqs_table, modules):
-        Artifact.build(self, prereqs_table, modules)
+    def build(self, modules):
+        Artifact.build(self, modules)
         self._rule = SharedRule(self._name, self._objs + modules,
                                 self._objs, self._args)
 
@@ -504,8 +534,8 @@ class StaticLibrary(Artifact):
     Static Libary
     """
 
-    def build(self, prereqs_table, modules):
-        Artifact.build(self, prereqs_table, modules)
+    def build(self, modules):
+        Artifact.build(self, modules)
         self._rule = StaticRule(self._name, self._objs + modules,
                                 self._objs, self._args)
 
@@ -513,58 +543,10 @@ class StaticLibrary(Artifact):
 def globs(args):
     sources = []
     for path in args:
+        if path.startswith('~/'):
+            path = os.path.expanduser(path)
         sources += glob.glob(path)
     return sources
-
-
-class DepsAnalyzer:
-    def __init__(self):
-        self._pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
-        self._prereqs_table = {}
-
-    def _find(self, source, includes, seen):
-        if source in seen:
-            return
-        seen.add(source)
-        curdir = os.path.dirname(source)
-        if curdir.strip('./') and curdir not in includes:
-            includes.append(curdir)
-        with open(source) as f:
-            headers = self._pattern.findall(f.read())
-        for header in headers:
-            found = False
-            for include in list(includes):
-                path = os.path.join(include, header)
-                if path.startswith('./'):
-                    path = path[2:]
-                if os.path.exists(path):
-                    self._find(path, includes, seen)
-                    found = True
-                    break
-            # Temporarily skip following check.
-            if False and not found and (source.endswith('.c')
-                                        or source.endswith('.cc')
-                                        or source.endswith('.cpp')):
-                raise BuildError('Not Found: %s from %s' %
-                                 (header, where))
-
-    def _scan(self, src, includes):
-        where = src
-        seen = set()
-        self._find(src, includes, seen)
-        seen.discard(src)
-        prereqs = [src]
-        prereqs.extend(seen)
-        return prereqs
-
-    def analyze(self, sources, includes):
-        fmt = '[%%%dd/%%d] analyze %%s' % len(str(len(sources)))
-        for i, source in enumerate(sources):
-            say(fmt, i + 1, len(sources), source)
-            if source not in self._prereqs_table:
-                prereqs = self._scan(source, includes)
-                self._prereqs_table[source] = prereqs
-        return self._prereqs_table
 
 
 class Module:
@@ -590,7 +572,6 @@ class Module:
         self._artifacts = []
         self._sub_modules = []
         self._phonies = ['all', 'clean']
-        self._analyzer = DepsAnalyzer()
         self._output_path = output_path
 
     def set_cc(self, name_or_path):
@@ -695,15 +676,10 @@ class Module:
     def build(self, makefile):
         if self._protos:
             self._build(self._protos)
-        say('artifacts: [%s]',
-            ', '.join([artifact.name() for artifact in self._artifacts]))
-        sources = set()
-        for artifact in self._artifacts:
-            sources.update(artifact.sources())
-        prereqs_table = self._analyzer.analyze(sorted(sources), self._vars['includes'])
         modules = [module for module, _, _ in self._sub_modules]
         for artifact in self._artifacts:
-            artifact.build(prereqs_table, modules)
+            say('artifact: %s', artifact.name())
+            artifact.build(modules)
 
         self._write(makefile)
         self._save()
