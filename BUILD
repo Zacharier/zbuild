@@ -12,4 +12,4 @@ LDFLAGS('-L.')
 
 LDLIBS('-lpthread')
 
-BINARY('app', sources=['src/*.cc', 'src/*.cpp'])
+BINARY('app', includes=['src/'], sources=['src/*.cc', 'src/*.cpp'])

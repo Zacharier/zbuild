@@ -1,6 +1,6 @@
 # Build
 
-The Build is a simple but powerful `Makefile` generator, which generates a `Makefile` by a `BUILD` file located to the root path of project. In the progress of building, it can deductions a relation of dependency Between source files. In addtion, it also can watch some files were updated or deleted or added and re-generate a new `Makefile`.
+The Build is a simple but powerful `Makefile` generator, which generates a `Makefile` by a `BUILD` file located to the root path of project. In the progress of building, it can deductions relationships of dependency between source files. In addtion, it also can watch some files were updated or deleted or added and re-generate a new `Makefile`.
 
 NOTE: The user should executes `make` command after building is complete.
 
@@ -70,7 +70,10 @@ person.pb.cc  person.pb.h  person.proto
 
 The `Makefile` was generated after executing `python build.py build`, then need to excute `make` to compile and link the program. Finallay, a executable binary file was built in the path:
 
-`output/app/bin/app`
+```shell
+$ ls output/build/bin/app
+output/build/bin/app
+```
 
 ## Contribute
 

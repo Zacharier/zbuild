@@ -296,25 +296,7 @@ class Storage:
         self._db.close()
 
     def compare(self):
-
-        def delete(fname):
-            if os.path.exists(fname):
-                os.remove(fname)
-
-        updated_keys = set()
-        for target, (prereqs, command, is_obj) in self._cache.iteritems():
-            pair = self._db.get(target)
-            if not pair:
-                updated_keys.add(target)
-            else:
-                old_prereqs, old_command, _ = pair
-                if prereqs != old_prereqs or command != old_command:
-                    delete(target)
-                    updated_keys.add(target)
-
-        expired_keys = set(self._db.keys()) - set(self._cache.keys())
-        for key in expired_keys:
-            delete(key)
+        delete = lambda x: os.path.exists(x) and os.remove(x)
 
         def clean_artifact(table, invalid_keys):
             for target, (prereqs, _, is_obj) in table.iteritems():
@@ -323,8 +305,18 @@ class Storage:
                     delete(target)
                     break
 
+        updated_keys = set()
+        for target, (prereqs, command, is_obj) in self._cache.iteritems():
+            old_prereqs, old_command, _ = self._db.get(target, [None] * 3)
+            if prereqs != old_prereqs or command != old_command:
+                delete(target)
+                updated_keys.add(target)
+
+        expired_keys = set(self._db.keys()) - set(self._cache.keys())
         clean_artifact(self._db, expired_keys)
         clean_artifact(self._cache, updated_keys)
+        for key in expired_keys:
+            delete(key)
 
 
 class MakeRule:
@@ -352,7 +344,9 @@ class MakeRule:
         prereqs = break_str(self._prereqs) if hasattr(self, '_prereqs') else ''
         s = '%s : %s' % (self._target, prereqs)
         if self._command:
-            s += '\n\t%s' % self._command
+            # Merges multiple consecutive Spaces
+            command = ' '.join(filter(None, self._command.split(' ')))
+            s += '\n\t%s' % command
         return s
 
 
@@ -626,6 +620,10 @@ class Module:
         return kwargs
 
     def _sanitize(self, sources, protos, kwargs):
+        to_list = lambda x: x.split(' ') if isinstance(x, str) else x
+        sources = globs(to_list(sources))
+        protos = globs(to_list(protos))
+        kwargs = {key: to_list(val) for key, val in kwargs.iteritems() if val}
         pbs = [proto.replace('.proto', '.pb.cc') for proto in protos]
         self._protos.update(protos)
         scope = Scope(self._vars)
@@ -774,16 +772,16 @@ def api(module):
         module.set_protoc(arg)
 
     def BINARY(name, sources, protos=(), **kwargs):
-        module.add_binary(name, globs(sources), globs(protos), kwargs)
+        module.add_binary(name, sources, protos, kwargs)
 
     def TEST(name, sources, protos=(), **kwargs):
-        module.add_test(name, globs(sources), globs(protos), kwargs)
+        module.add_test(name, sources, protos, kwargs)
 
     def LIBRARY(name, sources, protos=(), **kwargs):
         if name.endswith('.a'):
-            module.add_static(name, globs(sources), globs(protos), kwargs)
+            module.add_static(name, sources, protos, kwargs)
         elif name.endswith('.so'):
-            module.add_shared(name, globs(sources), globs(protos), kwargs)
+            module.add_shared(name, sources, protos, kwargs)
         else:
             raise BuildError('Unrecognized: ' + name)
 
