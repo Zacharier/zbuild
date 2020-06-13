@@ -12,6 +12,4 @@ LDFLAGS('-L.')
 
 LDLIBS('-lpthread')
 
-# PROTOS('proto/*.proto')
-
-BINARY('app', includes=['src/'], sources=['src/*.cc', 'src/*.cpp'])
+BINARY('app', sources=['src/*.cc', 'src/*.cpp'])

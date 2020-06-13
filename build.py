@@ -450,10 +450,9 @@ class Artifact:
         return self._name
 
     def build(self, modules):
-        includes = self._args.get('includes', ())
         pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
 
-        def expand(headers):
+        def expand(headers, includes):
             prereq_paths = []
             for header in headers:
                 paths = [os.path.join(include, header) for include in includes]
@@ -465,15 +464,21 @@ class Artifact:
 
         def search(source):
             prereq_paths = []
+            # Create a dummy of original `includes` to append.
+            includes = list(self._args.get('includes', []))
             seen = set()
             queue = [source]
+            parent = os.path.dirname(source)
+            if parent:
+                includes.append(parent)
             while queue:
                 first = queue.pop(0)
                 prereq_paths.append(first)
                 with open(first) as f:
                     headers = pattern.findall(f.read())
-                    queue += expand(filter(lambda x: x not in seen, headers))
-                    seen.update(headers)
+                    new_headers = filter(lambda x: x not in seen, headers)
+                    queue += expand(new_headers, includes)
+                    seen.update(new_headers)
             return prereq_paths
 
         prereq_table = {}
