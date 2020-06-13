@@ -304,13 +304,13 @@ class Storage:
         updated_keys = set()
         for target, (prereqs, command, is_obj) in self._cache.iteritems():
             pair = self._db.get(target)
-            if pair:
+            if not pair:
+                updated_keys.add(target)
+            else:
                 old_prereqs, old_command, _ = pair
                 if prereqs != old_prereqs or command != old_command:
                     delete(target)
                     updated_keys.add(target)
-            else:
-                updated_keys.add(target)
 
         expired_keys = set(self._db.keys()) - set(self._cache.keys())
         for key in expired_keys:
@@ -459,8 +459,8 @@ class Artifact:
         def expand(headers):
             prereq_paths = []
             for header in headers:
-                for include in includes:
-                    path = os.path.join(include, header)
+                paths = [os.path.join(include, header) for include in includes]
+                for path in paths:
                     if os.path.exists(path):
                         prereq_paths.append(path)
                         break
@@ -475,9 +475,8 @@ class Artifact:
                 prereq_paths.append(first)
                 with open(first) as f:
                     headers = pattern.findall(f.read())
-                    hs = filter(lambda x: x not in seen, headers)
+                    queue += expand(filter(lambda x: x not in seen, headers))
                     seen.update(headers)
-                    queue += expand(hs)
             return prereq_paths
 
         prereq_table = {}
