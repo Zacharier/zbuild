@@ -449,9 +449,6 @@ class Artifact:
     def name(self):
         return self._name
 
-    def sources(self):
-        return self._sources
-
     def build(self, modules):
         includes = self._args.get('includes', ())
         pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
@@ -480,7 +477,7 @@ class Artifact:
             return prereq_paths
 
         prereq_table = {}
-        fmt = '[%%%dd/%%d] analyzing %%s' % len(str(len(self._sources)))
+        fmt = '[%%%dd/%%d] analyze %%s' % len(str(len(self._sources)))
         for i, source in enumerate(self._sources):
             say(fmt, i + 1, len(self._sources), source)
             prereqs = search(source)
@@ -679,6 +676,7 @@ class Module:
         for artifact in self._artifacts:
             say('artifact: %s', artifact.name())
             artifact.build(modules)
+            say('-' * 60)
 
         self._write(makefile)
         self._save()
@@ -880,7 +878,7 @@ class BiuBiu:
         pwd = os.getcwd()
         workspace = pwd
         name = os.path.basename(workspace)
-        say('=' * 40 + ' build ' + name + ' ' + '=' * 40)
+        say('=' * 60)
 
         major = Module(workspace, self._build_path, self._output_path)
         execfile(os.path.join(workspace, 'BUILD'), api(major))
@@ -888,7 +886,6 @@ class BiuBiu:
 
         module_paths = [pwd]
         for name, workspace, _ in major.sub_modules():
-            say('=' * 40 + ' build ' + name + ' ' + '=' * 40)
             os.chdir(workspace)
             module = Module(workspace, self._build_path, self._output_path)
             execfile(os.path.join(workspace, 'BUILD'), api(module))
@@ -898,7 +895,6 @@ class BiuBiu:
 
         self._write_modules(module_paths)
 
-        say('-' * 50)
         say('build makefile : Makefile')
         say('build output   : %s', os.path.join(major.output(), ''))
         say('build date     : %s', time.strftime('%Y-%m-%d %H:%M:%S ',
