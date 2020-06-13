@@ -297,26 +297,17 @@ class Storage:
 
     def compare(self):
         delete = lambda x: os.path.exists(x) and os.remove(x)
-
-        def clean_artifact(table, invalid_keys):
-            for target, (prereqs, _, is_obj) in table.iteritems():
-                if is_obj: continue
-                if set(prereqs) & invalid_keys:
-                    delete(target)
-                    break
-
-        updated_keys = set()
-        for target, (prereqs, command, is_obj) in self._cache.iteritems():
+        for target, (prereqs, command, _) in self._cache.iteritems():
             old_prereqs, old_command, _ = self._db.get(target, [None] * 3)
             if prereqs != old_prereqs or command != old_command:
                 delete(target)
-                updated_keys.add(target)
-
         expired_keys = set(self._db.keys()) - set(self._cache.keys())
-        clean_artifact(self._db, expired_keys)
-        clean_artifact(self._cache, updated_keys)
         for key in expired_keys:
             delete(key)
+        for target, (prereqs, _, is_obj) in self._db.iteritems():
+            if is_obj: continue
+            if set(prereqs) & expired_keys:
+                delete(target)
 
 
 class MakeRule:
