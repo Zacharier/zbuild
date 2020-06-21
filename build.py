@@ -247,6 +247,17 @@ class Scope(dict):
         dict.__init__(self)
         self._parent = d
 
+    def extend(self, subscope):
+        for key, val in subscope.iteritems():
+            refval = self.get(key)
+            if refval:
+                refval += val
+            else:
+                self[key] = val
+
+    def __contains__(self, key):
+        return Dict.__contains__(self, key) or key in self._parent
+
     def __getitem__(self, key):
         try:
             return dict.__getitem__(self, key)
@@ -347,8 +358,7 @@ class CompileRule(MakeRule):
     """
 
     def __init__(self, fname, prereqs, args, artifact):
-        target = os.path.join(args['output'], 'objs',
-                              fname + '.' + artifact + '.o')
+        target = os.path.join(args['output'], 'objs', artifact, fname + '.o')
         args['target'] = target
         args['sources'] = fname
         cc_fmt = '%(cc)s -o %(target)s -c %(cflags)s %(includes)s ' \
@@ -423,10 +433,11 @@ class Artifact:
     or a archived file(.a).
     """
 
-    def __init__(self, name, args, sources):
+    def __init__(self, name, args, sources, sub_modules):
         self._name = name
         self._args = args
         self._sources = sources
+        self._sub_modules = sub_modules
         self._objs = []
         self._rule = None
         self._sub_rules = []
@@ -434,7 +445,7 @@ class Artifact:
     def name(self):
         return self._name
 
-    def build(self, modules):
+    def build(self):
         pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
 
         def expand(headers, includes):
@@ -487,9 +498,9 @@ class Binary(Artifact):
     Binary file.
     """
 
-    def build(self, modules):
-        Artifact.build(self, modules)
-        self._rule = LinkRule(self._name, self._objs + modules,
+    def build(self):
+        Artifact.build(self)
+        self._rule = LinkRule(self._name, self._objs + self._sub_modules,
                               self._objs, self._args)
 
 
@@ -498,9 +509,9 @@ class Test(Artifact):
     Unit Test.
     """
 
-    def build(self, modules):
-        Artifact.build(self, modules)
-        self._rule = LinkRule(self._name, self._objs + modules,
+    def build(self):
+        Artifact.build(self)
+        self._rule = LinkRule(self._name, self._objs + self._sub_modules,
                               self._objs, self._args, True)
 
 
@@ -509,9 +520,9 @@ class SharedLibrary(Artifact):
     Shared Object.
     """
 
-    def build(self, modules):
-        Artifact.build(self, modules)
-        self._rule = SharedRule(self._name, self._objs + modules,
+    def build(self):
+        Artifact.build(self)
+        self._rule = SharedRule(self._name, self._objs + self._sub_modules,
                                 self._objs, self._args)
 
 
@@ -520,10 +531,19 @@ class StaticLibrary(Artifact):
     Static Libary
     """
 
-    def build(self, modules):
-        Artifact.build(self, modules)
-        self._rule = StaticRule(self._name, self._objs + modules,
+    def build(self):
+        Artifact.build(self)
+        self._rule = StaticRule(self._name, self._objs + self._sub_modules,
                                 self._objs, self._args)
+
+
+def to_list(args):
+    """
+    Convet the following cases to list:
+    1. 'a b c' -> ['a', 'b', 'c']
+    2. list/set/tuple -> list
+    """
+    return args.split(' ') if isinstance(args, str) else list(args)
 
 
 def globs(args):
@@ -582,7 +602,7 @@ class Module:
         workspace = os.path.abspath(workspace)
         name = os.path.basename(workspace.rstrip('/'))
         output = os.path.join(workspace, self._output_path, name, '')
-        libs = [os.path.join(output, lib) for lib in libs]
+        libs = [os.path.join(output, lib) for lib in to_list(libs)]
         for lib in libs:
             self.add_ldlibs(lib)
         self._sub_modules.append((name, workspace, libs))
@@ -591,8 +611,8 @@ class Module:
     def sub_modules(self):
         return self._sub_modules
 
-    def output(self):
-        return self._vars['output']
+    def name(self):
+        return self._name
 
     def set_protoc(self, name_or_path):
         self._protoc = name_or_path
@@ -611,35 +631,32 @@ class Module:
         return kwargs
 
     def _sanitize(self, sources, protos, kwargs):
-        to_list = lambda x: x.split(' ') if isinstance(x, str) else x
         sources = globs(to_list(sources))
         protos = globs(to_list(protos))
         kwargs = {key: to_list(val) for key, val in kwargs.iteritems() if val}
         pbs = [proto.replace('.proto', '.pb.cc') for proto in protos]
         self._protos.update(protos)
         scope = Scope(self._vars)
-        scope.update(self._adjust(kwargs))
+        scope.extend(self._adjust(kwargs))
         return scope, sources + pbs
 
-    def add_binary(self, name, sources, protos, kwargs):
+    def _add_artifact(self, cls, name, sources, protos, kwargs):
         scope, srcs = self._sanitize(sources, protos, kwargs)
-        app = Binary(name, scope, srcs)
-        self._artifacts.append(app)
+        sub_modules = [module for module, _, _ in self._sub_modules]
+        artifact = cls(name, scope, srcs, sub_modules)
+        self._artifacts.append(artifact)
+
+    def add_binary(self, name, sources, protos, kwargs):
+        self._add_artifact(Binary, name, sources, protos, kwargs)
 
     def add_test(self, name, sources, protos, kwargs):
-        scope, srcs = self._sanitize(sources, protos, kwargs)
-        app = Test(name, scope, srcs)
-        self._artifacts.append(app)
+        self._add_artifact(Binary, name, sources, protos, kwargs)
 
     def add_shared(self, name, sources, protos, kwargs):
-        scope, srcs = self._sanitize(sources, protos, kwargs)
-        shared = SharedLibrary(name, scope, srcs)
-        self._artifacts.append(shared)
+        self._add_artifact(SharedLibrary, name, sources, protos, kwargs)
 
     def add_static(self, name, sources, protos, kwargs):
-        scope, srcs = self._sanitize(sources, protos, kwargs)
-        static = StaticLibrary(name, scope, srcs)
-        self._artifacts.append(static)
+        self._add_artifact(StaticLibrary, name, sources, protos, kwargs)
 
     def _save(self):
         storage = self._storage
@@ -660,16 +677,15 @@ class Module:
                                                  os.path.dirname(proto), proto)
             say(command, color='green')
             status, text = commands.getstatusoutput(command)
-            if status:
-                raise BuildError(text)
+            assert status == 0, text
 
     def build(self, makefile):
         if self._protos:
             self._build(self._protos)
-        modules = [module for module, _, _ in self._sub_modules]
+
         for artifact in self._artifacts:
-            say('artifact: %s', artifact.name())
-            artifact.build(modules)
+            say('[%s] artifact: %s', self._name, artifact.name())
+            artifact.build()
             say('-' * 60)
 
         self._write(makefile)
@@ -769,12 +785,11 @@ def api(module):
         module.add_test(name, sources, protos, kwargs)
 
     def LIBRARY(name, sources, protos=(), **kwargs):
+        assert name.endswith('.a') or name.endswith('.so')
         if name.endswith('.a'):
             module.add_static(name, sources, protos, kwargs)
-        elif name.endswith('.so'):
-            module.add_shared(name, sources, protos, kwargs)
         else:
-            raise BuildError('Unrecognized: ' + name)
+            module.add_shared(name, sources, protos, kwargs)
 
     def SUBMODULE(workspace, libs):
         module.add_sub_module(workspace, libs)
@@ -890,7 +905,7 @@ class BiuBiu:
         self._write_modules(module_paths)
 
         say('build makefile : Makefile')
-        say('build output   : %s', os.path.join(major.output(), ''))
+        say('build output   : %s', os.path.join(self._output_path, ''))
         say('build date     : %s', time.strftime('%Y-%m-%d %H:%M:%S ',
                                                  time.localtime()))
 
@@ -925,7 +940,7 @@ def do_args(args):
 
     parser = ArgumentParser(version=__version__)
     parser.add_command('create', 'Create BUILD file', create_parser)
-    parser.add_command('build', 'Build project and create a makefile', None)
+    parser.add_command('build', 'Build project and generate a makefile', None)
     parser.add_command('clean', 'Clean this project', None)
     command, options = parser.parse(args)
     return command, options
@@ -934,17 +949,13 @@ def do_args(args):
 def main(args):
     command, options = do_args(args)
     biu = BiuBiu()
-    try:
-        if command == 'create':
-            biu.create(options)
-        elif command == 'build':
-            say(LOGO)
-            biu.build()
-        elif command == 'clean':
-            biu.clean()
-    except Exception as e:
-        say(e, color="red")
-        raise
+    if command == 'create':
+        biu.create(options)
+    elif command == 'build':
+        say(LOGO)
+        biu.build()
+    elif command == 'clean':
+        biu.clean()
 
 
 if __name__ == '__main__':
