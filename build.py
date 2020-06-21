@@ -240,12 +240,11 @@ class ArgumentParser:
 
 class Scope(dict):
     """
-    A two level dict.
+    A extended dict.
     """
 
     def __init__(self, d):
-        dict.__init__(self)
-        self._parent = d
+        dict.__init__(self, d)
 
     def extend(self, subscope):
         for key, val in subscope.iteritems():
@@ -254,18 +253,6 @@ class Scope(dict):
                 refval += val
             else:
                 self[key] = val
-
-    def __contains__(self, key):
-        return Dict.__contains__(self, key) or key in self._parent
-
-    def __getitem__(self, key):
-        try:
-            return dict.__getitem__(self, key)
-        except KeyError:
-            return self._parent[key]
-
-    def __setitem__(self, key, val):
-        return dict.__setitem__(self, key, val)
 
 
 class Flags(list):

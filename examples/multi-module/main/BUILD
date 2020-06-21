@@ -14,5 +14,5 @@ LDLIBS('-lpthread')
 
 SUBMODULE('../sub/', 'lib/libfoo.a')
 
-BINARY('app', includes=['src/'], sources=['src/*.cc', 'src/*.cpp'], cxxflags=['-O0'])
+BINARY('app', includes=['src/'], sources=['src/*.cc', 'src/*.cpp'], cxxflags=['-O0'], ldlibs=['-lm'])
 LIBRARY('libapp.a', includes=['src/'], sources=['src/*.cc', 'src/*.cpp'])
