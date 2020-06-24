@@ -272,7 +272,7 @@ class Includes(list):
 
 class Storage:
     """
-    Load a shelve db and compare with current cache.
+    Load and store a shelve db, also compare with current cache.
     """
 
     def __init__(self, path='.biu'):
@@ -526,9 +526,9 @@ class StaticLibrary(Artifact):
 
 def to_list(args):
     """
-    Convet the following cases to list:
+    Convert the following types to list:
     1. 'a b c' -> ['a', 'b', 'c']
-    2. list/set/tuple -> list
+    2. list/set/tuple/dict -> list
     """
     return args.split(' ') if isinstance(args, str) else list(args)
 
@@ -562,6 +562,7 @@ class Module:
         self._protoc = 'protoc'
         self._storage = Storage(build_path)
         self._protos = set()
+        self._proto_srcs = []
         self._artifacts = []
         self._sub_modules = []
         self._phonies = ['all', 'clean']
@@ -604,8 +605,8 @@ class Module:
     def set_protoc(self, name_or_path):
         self._protoc = name_or_path
 
-    def protoc(self):
-        return self._protoc
+    def proto_srcs(self):
+        return self._proto_srcs
 
     def _adjust(self, kwargs):
         if 'includes' in kwargs:
@@ -655,20 +656,27 @@ class Module:
             storage.set(rule.target(), rule.prereqs(), rule.command(), False)
         storage.save()
 
-    def _build(self, protos):
-        proto_dirs = set([os.path.dirname(path) for path in protos])
-        proto_paths = ' '.join(
-            ['--proto_path ' + proto_dir for proto_dir in proto_dirs])
-        for proto in protos:
-            command = '%s %s --cpp_out=%s %s' % (self.protoc(), proto_paths,
+    def build(self, makefile):
+        for proto in self._protos:
+            pbname, _ = os.path.splitext(proto)
+            pbh = pbname + '.pb.h'
+            pbcc = pbname + '.pb.cc'
+            self._proto_srcs += (pbh, pbcc)
+            if os.path.exists(pbh) and os.path.exists(pbcc):
+                pbh_mtime = os.path.getmtime(pbh)
+                pbcc_mtime = os.path.getmtime(pbcc)
+                proto_mtime = os.path.getmtime(proto)
+                if pbh_mtime > proto_mtime and pbcc_mtime > proto_mtime:
+                    continue
+
+            proto_dirs = set([os.path.dirname(path) for path in self._protos])
+            proto_paths = ' '.join(
+                ['--proto_path ' + proto_dir for proto_dir in proto_dirs])
+            command = '%s %s --cpp_out=%s %s' % (self._protoc, proto_paths,
                                                  os.path.dirname(proto), proto)
             say(command, color='green')
             status, text = commands.getstatusoutput(command)
             assert status == 0, text
-
-    def build(self, makefile):
-        if self._protos:
-            self._build(self._protos)
 
         for artifact in self._artifacts:
             say('[%s] artifact: %s', self._name, artifact.name())
@@ -863,11 +871,18 @@ class BiuBiu:
         self._build_path = '.biu'
         self._output_path = 'output'
         self._modules_path = os.path.join(self._build_path, 'modules')
+        self._pbsrc_path = os.path.join(self._build_path, 'protos')
 
     def _write_modules(self, workspaces):
         with open(self._modules_path, 'w') as f:
             for workspace in workspaces:
                 f.write(workspace)
+                f.write('\n')
+
+    def _write_lines(self, fname, lines):
+        with open(fname, 'w') as f:
+            for line in lines:
+                f.write(line)
                 f.write('\n')
 
     def build(self):
@@ -881,6 +896,7 @@ class BiuBiu:
         major.build('Makefile')
 
         module_paths = [pwd]
+        pbsrc_paths = list(major.proto_srcs())
         for name, workspace, _ in major.sub_modules():
             os.chdir(workspace)
             module = Module(workspace, self._build_path, self._output_path)
@@ -888,8 +904,10 @@ class BiuBiu:
             module.build('Makefile')
             os.chdir(pwd)
             module_paths.append(workspace)
+            pbsrc_paths += module.proto_srcs()
 
-        self._write_modules(module_paths)
+        self._write_lines(self._modules_path, module_paths)
+        self._write_lines(self._pbsrc_path, pbsrc_paths)
 
         say('build makefile : Makefile')
         say('build output   : %s', os.path.join(self._output_path, ''))
@@ -904,6 +922,12 @@ class BiuBiu:
         if os.path.exists(self._modules_path):
             with open(self._modules_path) as f:
                 modules = [line.strip() for line in f.readlines()]
+        if os.path.exists(self._pbsrc_path):
+            with open(self._pbsrc_path) as f:
+                for line in f:
+                    fname = line.strip()
+                    if os.path.exists(fname):
+                        os.remove(fname)
         for workspace in modules:
             makefile_path = os.path.join(workspace, 'Makefile')
             build_path = os.path.join(workspace, self._build_path)
