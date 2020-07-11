@@ -16,7 +16,11 @@
 # limitations under the License.
 
 """
+This utility provides a set of interfaces which are inspired by the following:
 https://www.gnu.org/software/make/manual/make.html
+
+In addition, which also supports to speed up the build process by `Ccache`.
+For detailed infomation of `Ccache` refer to: https://ccache.dev/
 """
 
 import commands
@@ -330,9 +334,9 @@ class CompileRule(MakeRule):
         target = os.path.join(args['output'], 'objs', artifact, fname + '.o')
         args['target'] = target
         args['sources'] = fname
-        cc_fmt = '%(cc)s -o %(target)s -c %(cflags)s %(includes)s ' \
+        cc_fmt = '%(ccache)s %(cc)s -o %(target)s -c %(cflags)s %(includes)s ' \
                  '%(sources)s'
-        cxx_fmt = '%(cxx)s -o %(target)s -c %(cxxflags)s %(includes)s ' \
+        cxx_fmt = '%(ccache)s %(cxx)s -o %(target)s -c %(cxxflags)s %(includes)s ' \
                   '%(sources)s'
         fmt = cc_fmt if fname.endswith('.c') else cxx_fmt
         command = fmt % args
@@ -349,7 +353,7 @@ class LinkRule(MakeRule):
                               'test' if test else 'bin', name)
         args['target'] = target
         args['objs'] = break_str(objs)
-        fmt = '%(cxx)s -o %(target)s %(objs)s %(ldflags)s ' \
+        fmt = '%(ccache)s %(cxx)s -o %(target)s %(objs)s %(ldflags)s ' \
               '-Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
         command = fmt % args
         MakeRule.__init__(self, target, prereqs, command)
@@ -364,7 +368,7 @@ class SharedRule(MakeRule):
         target = os.path.join(args['output'], 'lib', name)
         args['target'] = self._target
         args['objs'] = break_str(objs)
-        fmt = '%(cxx)s -o %(target)s shared -fPIC' \
+        fmt = '%(ccache)s %(cxx)s -o %(target)s shared -fPIC' \
               '%(objs)s %(ldflags)s -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
         command = fmt % args
         MakeRule.__init__(self, target, prereqs, command)
@@ -530,14 +534,15 @@ class Module:
     def __init__(self, workspace, build_path='.biu', output_path='output'):
         self._name = os.path.basename(workspace)
         self._vars = self._adjust({
+            'cc': 'gcc',
+            'cxx': 'g++',
+            'ccache': '',
             'cflags': [],
             'cxxflags': [],
             'ldflags': [],
             'ldlibs': [],
             'includes': [],
             'output': os.path.join(output_path, self._name, ''),
-            'cc': 'gcc',
-            'cxx': 'g++',
         })
         self._protoc = 'protoc'
         self._storage = Storage(build_path)
@@ -553,6 +558,9 @@ class Module:
 
     def set_cxx(self, name_or_path):
         self._vars['cxx'] = name_or_path
+
+    def set_ccache(self, name_or_path):
+        self._vars['ccache'] = name_or_path
 
     def add_cflags(self, flags):
         self._vars['cflags'].append(flags)
@@ -742,6 +750,9 @@ def api(module):
     def CXX(arg):
         module.set_cxx(arg)
 
+    def CCACHE(arg):
+        module.set_ccache(arg)
+
     def CFLAGS(arg):
         module.add_cflags(arg)
 
@@ -847,7 +858,7 @@ class BiuBiu:
         say('build date     : %s', time.strftime('%Y-%m-%d %H:%M:%S ',
                                                  time.localtime()))
 
-        say('\nplease execute `make` command to make this project.',
+        say('\nplease execute the `make` command to make this project.',
             color='yellow')
 
     def clean(self):
@@ -881,12 +892,10 @@ class BiuBiu:
 
 def do_args(argv):
     name, args = argv[0], argv[1:]
-
+    parser = ArgumentParser(os.path.basename(name), version=__version__)
     create_parser = OptionsParser()
     create_parser.add_option('--name',
                              help='Artifact name. eg: app')
-
-    parser = ArgumentParser(name, version=__version__)
     parser.add_command('create', 'Create BUILD file', create_parser)
     parser.add_command('build', 'Build project and generate a makefile', None)
     parser.add_command('clean', 'Clean this project', None)

@@ -1,8 +1,8 @@
 # Build
 
-The Build is a simple but powerful `Makefile` generator, which generates a `Makefile` by a `BUILD` file located to the root path of project. In the progress of building, it can deductions relationships of dependency between source files. In addtion, it also can watch some files were updated or deleted or added and re-generate a new `Makefile`.
+The Build is a simple but powerful `Makefile` generator, which generates a `Makefile` by a `BUILD` file located to the root path of project. In the progress of building, it can deductions relationships of dependency between source files. In addtion, it can also watchs all file changes(eg: some files are updated/deleted or add new one) and re-generate a new `Makefile`.
 
-NOTE: The user should executes `make` command after building is complete.
+NOTE: The user should always executes the `make` command after building is complete.
 
 ## How to use
 
