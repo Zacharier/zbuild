@@ -413,6 +413,12 @@ class Artifact:
     def name(self):
         return self._name
 
+    def rule(self):
+        return self._rule
+
+    def obj_rules(self):
+        return self._sub_rules
+
     def build(self):
         pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
 
@@ -452,12 +458,6 @@ class Artifact:
             rule = CompileRule(source, prereqs, self._args, self._name)
             self._objs.append(rule.target())
             self._sub_rules.append(rule)
-
-    def obj_rules(self):
-        return self._sub_rules
-
-    def rule(self):
-        return self._rule
 
 
 class Binary(Artifact):
