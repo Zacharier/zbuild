@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/env python
 #
 # Copyright 2019 Zacharier
 #
@@ -23,13 +23,13 @@ In addition, which also supports to speed up the build process by `Ccache`.
 For detailed infomation of `Ccache` refer to: https://ccache.dev/
 """
 
-import commands
 import glob
 import os
 import re
 import shelve
 import shutil
 import sys
+import subprocess
 import time
 
 __version__ = '1.0.0'
@@ -148,7 +148,7 @@ class OptionsParser:
                         'option %s: %s is required' % (arg, typo))
                 opts[arg[2:]] = val
             i += 1
-        for option, (_, _, required, _) in self._actions.iteritems():
+        for option, (_, _, required, _) in self._actions.items():
             if required and option[2:] not in opts:
                 raise ArgError('option %s is required' % option)
         return opts
@@ -156,7 +156,7 @@ class OptionsParser:
     def help(self, cmd='general'):
         s = cmd.title() + ' Options:\n'
         last = ''
-        for key, (_, help, __, ___) in self._actions.iteritems():
+        for key, (_, help, __, ___) in self._actions.items():
             if '--help' == key:
                 last = '  %-20s %s\n' % (key, help)
             else:
@@ -233,7 +233,7 @@ class Scope(dict):
         dict.__init__(self, d)
 
     def extend(self, subscope):
-        for key, val in subscope.iteritems():
+        for key, val in subscope.items():
             refval = self.get(key)
             if refval:
                 refval += val
@@ -281,14 +281,14 @@ class Storage:
 
     def compare(self):
         delete = lambda x: os.path.exists(x) and os.remove(x)
-        for target, (prereqs, command, _) in self._cache.iteritems():
+        for target, (prereqs, command, _) in self._cache.items():
             old_prereqs, old_command, _ = self._db.get(target, [None] * 3)
             if prereqs != old_prereqs or command != old_command:
                 delete(target)
         expired_keys = set(self._db.keys()) - set(self._cache.keys())
         for key in expired_keys:
             delete(key)
-        for target, (prereqs, _, is_obj) in self._db.iteritems():
+        for target, (prereqs, _, is_obj) in self._db.items():
             if is_obj: continue
             if set(prereqs) & expired_keys:
                 delete(target)
@@ -517,13 +517,55 @@ def to_list(args):
     return args.split(' ') if isinstance(args, str) else list(args)
 
 
+def find_executable_file(name):
+    """
+    Find the executable file in `PATH` environment variable by `name`
+    Return a absolute path if found. Otherwise returns `None`.
+    """
+    is_executable_file = lambda x: os.path.isfile(x) and os.access(x, os.X_OK)
+
+    if is_executable_file(name):
+        return name
+
+    path = os.getenv('PATH', os.defpath)
+    paths = path.split(os.pathsep)
+    for p in paths:
+        fname = os.path.join(p, name)
+        if is_executable_file(fname):
+            return fname
+    return None
+
+
+def execute_command(command):
+    """
+    Fork a subprocess and execute the `command`, then, read the output from
+    pipe.
+    """
+    p = subprocess.Popen(command, shell=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return p.wait(), p.stdout.read()
+
+
 def globs(args):
+    """
+    Expand user relative path and list  paths by matching a pathname pattern.
+    """
     sources = []
     for path in args:
         if path.startswith('~/'):
             path = os.path.expanduser(path)
         sources += glob.glob(path)
     return sources
+
+
+def execute_file(fname, globals, locals=None):
+    """
+    Read and execute a Python script from a file.
+    If only globals is given, locals defaults to it.
+    Supports both Python2/3
+    """
+    with open(fname, 'rb') as f:
+        exec(f.read(), globals, locals)
 
 
 class Module:
@@ -609,7 +651,7 @@ class Module:
     def _sanitize(self, sources, protos, kwargs):
         sources = globs(to_list(sources))
         protos = globs(to_list(protos))
-        kwargs = {key: to_list(val) for key, val in kwargs.iteritems() if val}
+        kwargs = {key: to_list(val) for key, val in kwargs.items() if val}
         pbs = [proto.replace('.proto', '.pb.cc') for proto in protos]
         self._protos.update(protos)
         scope = Scope(self._vars)
@@ -668,7 +710,7 @@ class Module:
             command = '%s %s --cpp_out=%s %s' % (self._protoc, proto_paths,
                                                  os.path.dirname(proto), proto)
             say(command, color='green')
-            status, text = commands.getstatusoutput(command)
+            status, text = execute_command(command)
             assert status == 0, text
 
         for artifact in self._artifacts:
@@ -745,13 +787,24 @@ def api(module):
     """
 
     def CC(arg):
-        module.set_cc(arg)
+        path = find_executable_file(arg)
+        assert path, 'not found `%s` in $PATH' % arg
+        module.set_cc(path)
 
     def CXX(arg):
-        module.set_cxx(arg)
+        path = find_executable_file(arg)
+        assert path, 'not found `%s` in $PATH' % arg
+        module.set_cxx(path)
 
     def CCACHE(arg):
-        module.set_ccache(arg)
+        path = find_executable_file(arg)
+        assert path, 'not found `%s` in $PATH' % arg
+        module.set_ccache(path)
+
+    def PROTOC(arg):
+        path = find_executable_file(arg)
+        assert path, 'not found `%s` in $PATH' % arg
+        module.set_protoc(path)
 
     def CFLAGS(arg):
         module.add_cflags(arg)
@@ -764,9 +817,6 @@ def api(module):
 
     def LDLIBS(arg):
         module.add_ldlibs(arg)
-
-    def PROTOC(arg):
-        module.set_protoc(arg)
 
     def BINARY(name, sources, protos=(), **kwargs):
         module.add_binary(name, sources, protos, kwargs)
@@ -797,6 +847,7 @@ class Template:
         lines = [
             "CC('gcc')",
             "CXX('g++')",
+            "# CCACHE('ccache')",
             "# PROTOC('protoc')",
             "CFLAGS('-g -pipe -Wall -std=c99')",
             "CXXFLAGS('-g -pipe -Wall -std=c++11')",
@@ -836,7 +887,7 @@ class BiuBiu:
         pwd = os.getcwd()
         workspace = pwd
         major = Module(workspace, self._build_path, self._output_path)
-        execfile(os.path.join(workspace, 'BUILD'), api(major))
+        execute_file(os.path.join(workspace, 'BUILD'), api(major))
         major.build('Makefile')
 
         module_paths = [pwd]
@@ -844,7 +895,7 @@ class BiuBiu:
         for name, workspace, _ in major.sub_modules():
             os.chdir(workspace)
             module = Module(workspace, self._build_path, self._output_path)
-            execfile(os.path.join(workspace, 'BUILD'), api(module))
+            execute_file(os.path.join(workspace, 'BUILD'), api(module))
             module.build('Makefile')
             os.chdir(pwd)
             module_paths.append(workspace)
